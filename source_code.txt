@@ -1,0 +1,485 @@
+File: /Users/tord/Code/Prosjekt_Hex/hex/tree.py
+from stateManager import Game, Hex
+import numpy as np
+import tensorflow as tf
+import math
+
+class MCTSNode:
+    def __init__(self, game : Game, state, parent = None, parentAction = None, player = None) -> None:
+        self.game = game
+        self.state = state
+        self.parent = parent
+        self.parentAction = parentAction
+        self.expandedChildren = []
+        self.possibleActions = game.legalActions(state)
+        self.visits = 1
+        self.reward = 0
+        
+    def q(self) -> int:
+        return self.reward/self.visits
+    
+    def n(self) -> int:
+        return self.visits
+    
+    def update(self, winner) -> None:
+        # The player indicator state[0] is the next player
+        self.visits += 1
+        if winner == self.state[0]:
+            self.reward -= 1
+        else: self.reward += 1
+
+
+    def fullyExpanded(self)-> bool:
+        return len(self.possibleActions) == len(self.expandedChildren)
+
+    def backpropagate(self, winner) -> None:
+        self.update(winner)
+        if self.parent:
+            self.parent.backpropagate(winner)
+        
+
+class MCTS:
+    def __init__(self, game : Game):
+        self.stateManager = game
+        self.current = None
+        self.c = 1
+    
+    def setRoot(self, node : MCTSNode):
+        self.root = node
+        if not self.current: self.current = self.root
+    
+    def treeSearch(self):
+        self.current = self.root
+        while not self.stateManager.isTerminal(self.current.state) and len(self.current.expandedChildren) != 0:
+            children = self.current.expandedChildren
+            if self.current.fullyExpanded():
+                choices_weights = [child.q() + self.c * np.sqrt((np.log(self.current.n()) / 1 + child.n())) for child in children]
+                if self.root.state[0] == self.current.state[0]:
+                    self.current = children[np.argmax(choices_weights)]
+                else:
+                    self.current = children[np.argmin(choices_weights)]
+            
+    def nodeExpansion(self):
+        for action in self.current.possibleActions:
+            next_state = self.stateManager.move(self.current.state, action)
+            child = MCTSNode(self.stateManager, next_state, parent = self.current, parentAction=action)
+            self.current.expandedChildren.append(child)
+    
+    
+    def leafEvaluation(self, targetPolicy):
+        winner = self.rollout(self.current.state,targetPolicy)
+        self.current.update(winner)
+        return winner
+        
+    def rollout(self, state, targetPolicy): 
+        if self.stateManager.isTerminal(state): return self.stateManager.winner(state)
+        size = int(math.sqrt(len(state)-1))
+        d = np.array(targetPolicy(np.array(state).reshape(1, -1)))[0]
+        legals = self.stateManager.legalActions(state)
+        legal_probs = [d[i * size + j] for i, j in legals]
+        index = np.argmax(legal_probs)
+        a = legals[index]
+        return self.rollout(self.stateManager.move(state, a), targetPolicy)
+        
+    def backpropagation(self, winner):
+        if self.current.parent:
+            self.current.parent.backpropagate(winner)
+
+File: /Users/tord/Code/Prosjekt_Hex/hex/topp.py
+import os
+from stateManager import Hex
+import numpy as np
+import tensorflow as tf
+from net import ANET
+import math
+import itertools
+
+
+PATH = '/Users/tord/Code/Prosjekt_Hex/hex/4x4_2024-05-02-21:13_'
+NUM_GAMES = 100
+HEXSIZE = 4
+LAYERCONFIG = [
+    {"neurons": 64, "activation": "relu"},
+    {"neurons": 64, "activation": "relu"}
+  ]
+def create_agents(config, model_dir, size):
+    agents = []
+    for filename in os.listdir(model_dir):
+        if filename.endswith(".h5"):
+            model_path = os.path.join(model_dir, filename)
+            agent = ANET(size**2,config)
+            agent.load_weights(model_path)
+            print(model_path)
+            agents.append([agent, filename]) 
+    return agents
+
+def play_tournament(agents, num_games,size):
+    num_agents = len(agents)
+    for i in range(num_agents):
+        for j in range(i+1, num_agents):
+            agent1 = agents[i][0]
+            agent2 = agents[j][0]
+            w = 0
+            for _ in range(num_games):
+                if play_game([agent1,agent2],size) == 1: 
+                    w +=1
+                    
+            print(f'{num_games} games: {agents[i][1]} vs {agents[j][1]}: {agents[i][1]} won {w}')
+
+
+def play_game(agents,size):
+    
+    board = Hex.initialize(size)
+    turn = np.random.choice([0,1])
+    board[0] = turn + 1
+    
+    while not Hex.isTerminal(board):
+        if turn == 0: turn = 1
+        else: turn = 0
+        d = agents[turn](np.array(board).reshape(1, -1))[0]
+        legal = Hex.legalActions(board)
+        legal_probs = [d[i * size + j] for i, j in legal]
+        index = np.argmax(legal_probs)
+        a = legal[index]
+        board = Hex.move(board, a)
+    return Hex.winner(board)
+
+def play_game_prob(agents,size):
+    board = Hex.initialize(size)
+    turn = np.random.choice([0,1])
+    board[0] = turn + 1
+    while not Hex.isTerminal(board):
+        if turn == 0: turn = 1
+        else: turn = 0
+        d = np.array(agents[turn](np.array(board).reshape(1, -1)))[0]
+        legals = Hex.legalActions(board)
+        legal_probs = [d[i * size + j] for i, j in legals]
+        sum_probs = sum(legal_probs)
+        normalized_probs = [prob / sum_probs for prob in legal_probs]
+        index = np.random.choice(len(legals), p=normalized_probs)
+        a = legals[index]
+        board = Hex.move(board, a)
+    return Hex.winner(board)
+    
+
+
+agents = create_agents(config=LAYERCONFIG, model_dir=PATH, size=HEXSIZE)
+
+for i, layer in enumerate(agents[0][0].layers):
+    print(f"Layer {i}: {layer.name}, Type: {type(layer)}")
+
+for i,j in agents:
+    print(j)
+
+# Play tournament
+play_tournament(agents, num_games=NUM_GAMES, size = HEXSIZE)
+
+
+
+File: /Users/tord/Code/Prosjekt_Hex/hex/net.py
+import tensorflow as tf
+import random
+
+
+class ANET(tf.keras.Model):
+    def __init__(self, output_size, layer_config):
+        super(ANET, self).__init__()
+        self.dense_layers = []
+        for config in layer_config:
+            neurons = config['neurons']
+            activation = config['activation']
+            self.dense_layers.append(tf.keras.layers.Dense(neurons, activation=activation))
+
+        self.output_layer = tf.keras.layers.Dense(output_size, activation='softmax')
+
+    def call(self, inputs):
+        x = inputs
+        for layer in self.dense_layers:
+            x = layer(x)
+        return self.output_layer(x)
+    
+
+def train(model, inputs, targets, epochs=1, batch_size=32):
+    history = model.fit(inputs, targets, epochs=epochs, batch_size=batch_size, verbose=1)
+    final_loss = history.history['loss'][-1]
+    print("Final Loss:", final_loss)
+    print("Final Accuracy:", history.history['accuracy'][-1])
+    print("Final Precision:", history.history['precision'][-1])
+    print("Final Recall:", history.history['recall'][-1])
+    print("Final F1 Score:", history.history['f1_score'][-1])
+    
+def setup(ANET,learning_rate=0.01, optimizer='Adam'):
+    if optimizer == 'Adagrad':
+        opt = tf.keras.optimizers.Adagrad(learning_rate=learning_rate)
+    elif optimizer == 'SGD':
+        opt = tf.keras.optimizers.SGD(learning_rate=learning_rate)
+    elif optimizer == 'RMSProp':
+        opt = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
+    elif optimizer == 'Adam':
+        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    ANET.compile(optimizer=opt, loss='categorical_crossentropy',metrics=['accuracy', 'precision', 'recall', 'f1_score'])
+    return ANET
+
+def get_random_minibatch(inputs, targets, minibatch_size=32, metrics=['accuracy', 'precision', 'recall', 'f1_score']):
+    if len(inputs) <= minibatch_size:
+        return inputs, targets
+
+    # Randomly select indices for the minibatch
+    minibatch_indices = random.sample(range(len(inputs)), minibatch_size)
+
+    # Extract minibatch inputs and targets using the selected indices
+    minibatch_inputs = [inputs[i] for i in minibatch_indices]
+    minibatch_targets = [targets[i] for i in minibatch_indices]
+
+    return minibatch_inputs, minibatch_targets
+
+
+File: /Users/tord/Code/Prosjekt_Hex/hex/test.py
+import matplotlib.pyplot as plt
+
+# Provided data
+data = {
+    'episode_0': 204,
+    'episode_10': 254,
+    'episode_20': 155,
+    'episode_30': 100,
+    'episode_40': 400,
+    'episode_50': 387
+}
+
+# Create bar chart
+plt.figure(figsize=(10, 6))
+plt.bar(data.keys(), data.values(), color='skyblue')
+plt.xlabel('Episodes')
+plt.ylabel('Wins')
+plt.title('Wins per Episode')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+File: /Users/tord/Code/Prosjekt_Hex/hex/stateManager.py
+import numpy as np
+import math
+class Game:
+    def __init__(self, size): pass
+    def isTerminal(self): pass
+    def winner(self): pass
+    def legalActions(self) -> list[int]: pass
+    def move(self): pass
+    def draw(self): pass
+    
+class Hex(Game):
+    def initialize(size) -> list[int]:
+        board = [0]*(size**2 + 1)
+        board[0] = 1
+        return board
+    
+    def playerTurn(board) -> int:
+        return board[0]
+    
+    def move(board, action: list[int]):
+        star = board.copy()
+        star[1 + action[0]*int(math.sqrt((len(board)-1))) + action[1]] = board[0]
+        star[0] = 3 - board[0]
+        return star
+
+    def isTerminal(board):
+        return Hex.winner(board) != 0
+    
+    def winner(board): 
+        size = int(math.sqrt(len(board)-1))
+        for k in range(size):
+            if(board[1+k] == 1):
+                chains = Hex.reach(board,0,k, 1)
+                for chain in chains:
+                    for link in chain:
+                        if link[0] == size-1 and board[1+link[0]*size + link[1]] == 1:
+                            return 1
+        for k in range(size):
+            if(board[1+k*size] == 2):
+                chains = Hex.reach(board,k,0, 2)
+                for chain in chains:
+                    for link in chain:
+                        if link[1] == size-1 and board[1+link[0]*size + link[1]] == 2:
+                            return 2
+        return 0
+    @staticmethod
+    def reach(board, i,j, player) -> list[int]:
+        new = True
+        chain = [[i,j]]
+        chains = [chain]
+        while new:
+            new = False
+            for chain in chains:
+                links = []
+                for l in Hex.neighbors(board,chain[-1][0], chain[-1][1], player):
+                    contains = False
+                    for link in chain:
+                        if link == l:
+                            contains = True
+                    if not contains:
+                        links.append(l)
+                while len(links) > 1:
+                    link = links.pop(-1)
+                    temp = chain.copy()
+                    temp.append(link)
+                    chains.append(temp)
+                if len(links) == 1:
+                    new = True
+                    chain.append(links.pop())
+        return chains
+    @staticmethod                    
+    def neighbors(board, i, j, player):
+        neighbors = []
+        board = np.array(board[1:]).reshape((int(math.sqrt(len(board))), int(math.sqrt(len(board)))))
+        if i > 0 and board[i-1][j] == player:
+            neighbors.append([i-1, j])
+        if i > 0 and j+1 < len(board[0]) and board[i-1][j+1] == player:
+            neighbors.append([i-1, j+1])
+        if j > 0 and board[i][j-1] == player:
+            neighbors.append([i, j-1])
+        if j+1 < len(board[0]) and board[i][j+1] == player:
+            neighbors.append([i, j+1])
+        if i+1 < len(board) and j > 0 and board[i+1][j-1] == player:
+            neighbors.append([i+1, j-1])
+        if i+1 < len(board) and board[i+1][j] == player:
+            neighbors.append([i+1, j])
+        return neighbors
+    
+    def legalActions(board) -> list[int]:
+        actions = []
+        index = 1
+        for i in range(int(math.sqrt(len(board)-1))):
+            for j in range(int(math.sqrt(len(board)-1))):
+                if board[index] == 0: actions.append([i,j])
+                index += 1
+        return actions 
+    
+    def draw(state):
+        size = int(math.sqrt(len(state)-1))
+        l = []
+        for i in range(1,len(state)):
+            l.append(str(int(state[i])))
+        k = [0]*size**2
+        indexes = []
+        for j in range(size+1):
+            for r in range(j,0,-1):
+                index = (r-1)*size + j- r
+                indexes.append(index)
+        for j in range(size,size*2):
+                for r in range(size,j-size+1,-1):
+                    index = (r-1)*size + j - r + 1
+                    indexes.append(index)           
+        for i in range(len(l)):
+            k[i] = l[indexes[i]]
+        index = 0
+        for i in range(1,size+1):
+            space = ' '*(size-i)
+            p = ''
+            for elem in k[index:index+i]:
+                p += elem
+                p += ' '
+            print(space + p)
+            index += i
+        for i in range(size-1,0,-1):
+            space = ' '*(size-i)
+            p = ''
+            for elem in k[index:index+i]:
+                p += elem
+                p += ' '
+            print(space + p)
+            index += i
+
+
+
+
+File: /Users/tord/Code/Prosjekt_Hex/hex/main.py
+from tree import MCTSNode, MCTS
+from stateManager import Game, Hex
+from net import ANET, setup, train, get_random_minibatch
+import numpy as np
+import datetime
+import os
+import random
+
+GAME = Hex
+HEXSIZE = 4
+
+LAYERCONFIG = [
+    {"neurons": 64, "activation": "relu"},
+    {"neurons": 64, "activation": "relu"}
+  ]
+NUM_EPISODES = 200
+SAVE_INTERVAL_INCREMENT = 50
+M_SIMULATIONS = 1000
+LEARNING_RATE = 0.001
+OPTIMIZER = 'Adam'
+EPOCHS = 3
+BATCHSIZE = 64
+TEST = True
+
+
+
+folder_path = f'/Users/tord/Code/Prosjekt_Hex/hex/{HEXSIZE}x{HEXSIZE}_{datetime.datetime.now().strftime("%Y-%m-%d-%H:%M")}_'
+os.makedirs(folder_path, exist_ok=True)
+weights_filename = os.path.join(folder_path, 'episode_0.weights.h5')
+
+net = ANET(HEXSIZE**2, layer_config=LAYERCONFIG)
+setup(net, learning_rate=LEARNING_RATE, optimizer=OPTIMIZER)
+net.load_weights('/Users/tord/Code/Prosjekt_Hex/hex/4x4_2024-05-02-21:13_/episode_200.weights.h5') 
+
+#saving before training starts
+net.save_weights(weights_filename)
+
+inputs = []
+targets = []
+
+for episode in range(1,NUM_EPISODES+1):
+    #RBUF
+    
+    root = MCTSNode(game = GAME, state = GAME.initialize(size=HEXSIZE))
+    
+    tree = MCTS(GAME)
+    tree.setRoot(root)
+    
+    nextRoot = tree.current
+
+    while not GAME.isTerminal(nextRoot.state):
+
+        tree.setRoot(nextRoot)
+        
+        for search in range(1, M_SIMULATIONS + 1):
+            tree.treeSearch()
+            reward = tree.leafEvaluation(net)
+            tree.backpropagation(reward)
+            tree.nodeExpansion()
+           
+        d = [0]*HEXSIZE**2
+
+        for child in tree.root.expandedChildren:
+            d[child.parentAction[0]*HEXSIZE + child.parentAction[1]] = child.n()
+
+
+        #RBUF
+        inputs.append(tree.root.state)
+        targets.append([elem/sum(d) for elem in d])
+        index = np.array(d).argmax()
+        action = [index//HEXSIZE, index%HEXSIZE]
+        nextRoot = [child for child in tree.root.expandedChildren if child.parentAction == action][0]
+        GAME.draw(nextRoot.state)
+    winner = GAME.winner(nextRoot.state)
+    print(f'Episode {episode} finished. Winner: Player {winner} Board:')
+    GAME.draw(nextRoot.state)
+    
+    minibatch_inputs, minibatch_targets = get_random_minibatch(inputs,targets, BATCHSIZE)
+    train(net, np.array(minibatch_inputs), np.array(minibatch_targets), epochs=EPOCHS)
+    
+    
+    if episode % SAVE_INTERVAL_INCREMENT == 0:
+        current = f'episode_{episode}.weights.h5'
+        weights_filename = os.path.join(folder_path, current)
+        net.save_weights(weights_filename)
+        
+
+
